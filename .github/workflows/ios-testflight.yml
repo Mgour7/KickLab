@@ -1,13 +1,7 @@
-# KickLab — TestFlight deployment (Step 11).
-#
-# Install this file in the repository as:  .github/workflows/ios-testflight.yml
-# It is separate from ios-tests.yml (which keeps building and testing without any
-# signing credentials) and never runs on its own: start it from the Actions tab →
-# "TestFlight deployment" → "Run workflow".
-#
-# Settings it needs (repository → Settings → Secrets and variables → Actions) are listed
-# in Deployment/TESTFLIGHT.md. A missing setting is reported by name before any build
-# time is spent. Credential values are never printed.
+
+# KickLab — TestFlight deployment (Step 11)
+# Run manually from GitHub Actions.
+# Does not modify the existing ios-tests.yml workflow.
 
 name: TestFlight deployment
 
@@ -36,6 +30,7 @@ jobs:
     name: Archive, sign and upload to TestFlight
     runs-on: macos-latest
     timeout-minutes: 75
+
     env:
       KICKLAB_SIGNING_MODE: ${{ vars.KICKLAB_SIGNING_MODE || 'automatic' }}
       APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
@@ -49,7 +44,6 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      # Same as ios-tests.yml: the project may be uploaded as a single .zip.
       - name: Unpack uploaded project zip if needed
         run: |
           if [ ! -f project.yml ]; then
@@ -74,7 +68,7 @@ jobs:
         run: bash Scripts/testflight/validate-config.sh
 
       - name: Select newest stable Xcode (26 or later)
-                run: |
+        run: |
           xcodebuild -version
           MAJOR="$(xcodebuild -version | sed -nE 's/^Xcode ([0-9]+).*/\1/p')"
           if [ "${MAJOR:-0}" -lt 26 ]; then
@@ -92,7 +86,10 @@ jobs:
 
       - name: Check app identity
         run: |
-          xcodebuild -showBuildSettings -project KickLab.xcodeproj -target KickLab -configuration Release \
+          xcodebuild -showBuildSettings \
+            -project KickLab.xcodeproj \
+            -target KickLab \
+            -configuration Release \
             > build/logs/build-settings.txt
           bash Scripts/testflight/check-project-identity.sh build/logs/build-settings.txt
 
@@ -147,7 +144,7 @@ jobs:
             if [ "$UPLOAD_REQUESTED" != "true" ]; then
               echo "- Upload: skipped (build and sign only)"
             elif [ "$UPLOAD_OUTCOME" = "success" ]; then
-              echo "- Upload: **succeeded** — the build appears in App Store Connect → TestFlight after processing (usually 5–30 minutes)"
+              echo "- Upload: **succeeded** — check App Store Connect → TestFlight after processing"
             else
               echo "- Upload: **not completed** (${UPLOAD_OUTCOME:-not reached})"
             fi
