@@ -74,18 +74,11 @@ jobs:
         run: bash Scripts/testflight/validate-config.sh
 
       - name: Select newest stable Xcode (26 or later)
-        run: |
-          NEWEST="$(for app in /Applications/Xcode_*.app; do
-                      case "$app" in *[Bb]eta*|*_RC*|*_rc*|'/Applications/Xcode_*.app') ;; *) echo "$app" ;; esac
-                    done | sort -V | tail -n 1)"
-          if [ -n "$NEWEST" ]; then
-            echo "Selecting $NEWEST"
-            sudo xcode-select -s "$NEWEST/Contents/Developer"
-          fi
+                run: |
           xcodebuild -version
           MAJOR="$(xcodebuild -version | sed -nE 's/^Xcode ([0-9]+).*/\1/p')"
           if [ "${MAJOR:-0}" -lt 26 ]; then
-            echo "::error::App Store Connect requires apps built with Xcode 26 or later; this runner has Xcode ${MAJOR:-unknown}."
+            echo "::error::Xcode 26 or later is required."
             exit 1
           fi
 
