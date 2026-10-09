@@ -1,0 +1,171 @@
+# KickLab — TestFlight deployment (Step 11).
+#
+# Install this file in the repository as:  .github/workflows/ios-testflight.yml
+# It is separate from ios-tests.yml (which keeps building and testing without any
+# signing credentials) and never runs on its own: start it from the Actions tab →
+# "TestFlight deployment" → "Run workflow".
+#
+# Settings it needs (repository → Settings → Secrets and variables → Actions) are listed
+# in Deployment/TESTFLIGHT.md. A missing setting is reported by name before any build
+# time is spent. Credential values are never printed.
+
+name: TestFlight deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to TestFlight (turn off to only build and sign)"
+        type: boolean
+        default: true
+      build_number:
+        description: "Build number (leave empty to use the run number)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Archive, sign and upload to TestFlight
+    runs-on: macos-latest
+    timeout-minutes: 75
+    env:
+      KICKLAB_SIGNING_MODE: ${{ vars.KICKLAB_SIGNING_MODE || 'automatic' }}
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+      ASC_KEY_ID: ${{ vars.ASC_KEY_ID || secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID || secrets.ASC_ISSUER_ID }}
+      KICKLAB_BUILD_NUMBER_OFFSET: ${{ vars.KICKLAB_BUILD_NUMBER_OFFSET }}
+      KICKLAB_BUNDLE_ID_EXPECTED: ${{ vars.KICKLAB_BUNDLE_ID }}
+      KICKLAB_LOG_DIR: build/logs
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # Same as ios-tests.yml: the project may be uploaded as a single .zip.
+      - name: Unpack uploaded project zip if needed
+        run: |
+          if [ ! -f project.yml ]; then
+            ZIP="$(find . -maxdepth 1 -name '*.zip' -print -quit)"
+            if [ -z "$ZIP" ]; then
+              echo "::error::No project.yml and no .zip found in the repository root."
+              exit 1
+            fi
+            echo "Unpacking $ZIP"
+            unzip -o -q "$ZIP"
+          fi
+          test -f project.yml
+          test -f Scripts/testflight/validate-config.sh
+          mkdir -p build/logs
+
+      - name: Check TestFlight settings
+        env:
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        run: bash Scripts/testflight/validate-config.sh
+
+      - name: Select newest stable Xcode (26 or later)
+        run: |
+          NEWEST="$(for app in /Applications/Xcode_*.app; do
+                      case "$app" in *[Bb]eta*|*_RC*|*_rc*|'/Applications/Xcode_*.app') ;; *) echo "$app" ;; esac
+                    done | sort -V | tail -n 1)"
+          if [ -n "$NEWEST" ]; then
+            echo "Selecting $NEWEST"
+            sudo xcode-select -s "$NEWEST/Contents/Developer"
+          fi
+          xcodebuild -version
+          MAJOR="$(xcodebuild -version | sed -nE 's/^Xcode ([0-9]+).*/\1/p')"
+          if [ "${MAJOR:-0}" -lt 26 ]; then
+            echo "::error::App Store Connect requires apps built with Xcode 26 or later; this runner has Xcode ${MAJOR:-unknown}."
+            exit 1
+          fi
+
+      - name: Generate the Xcode project
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+          xcodegen generate --spec project.yml
+
+      - name: Check app identity
+        run: |
+          xcodebuild -showBuildSettings -project KickLab.xcodeproj -target KickLab -configuration Release \
+            > build/logs/build-settings.txt
+          bash Scripts/testflight/check-project-identity.sh build/logs/build-settings.txt
+
+      - name: Choose build number
+        env:
+          BUILD_NUMBER_OVERRIDE: ${{ inputs.build_number }}
+        run: |
+          NUMBER="$(bash Scripts/testflight/build-number.sh)"
+          echo "KICKLAB_BUILD_NUMBER=$NUMBER" >> "$GITHUB_ENV"
+          echo "Build number: $NUMBER"
+
+      - name: Install signing material (temporary)
+        env:
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_P12_BASE64 }}
+          IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+        run: bash Scripts/testflight/prepare-signing.sh
+
+      - name: Archive for iOS devices
+        run: bash Scripts/testflight/archive.sh
+
+      - name: Export signed .ipa
+        run: bash Scripts/testflight/export.sh
+
+      - name: Verify the .ipa
+        run: bash Scripts/testflight/verify-ipa.sh build/export/KickLab.ipa
+
+      - name: Upload to TestFlight
+        id: upload
+        if: ${{ inputs.upload }}
+        run: bash Scripts/testflight/upload.sh build/export/KickLab.ipa
+
+      - name: Clean up signing material
+        if: always()
+        run: bash Scripts/testflight/cleanup-signing.sh
+
+      - name: Summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          UPLOAD_REQUESTED: ${{ inputs.upload }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          {
+            echo "## KickLab TestFlight deployment"
+            echo ""
+            echo "- Xcode: $(xcodebuild -version | head -n 1)"
+            echo "- Signing mode: ${KICKLAB_SIGNING_MODE}"
+            echo "- Bundle identifier: ${KICKLAB_BUNDLE_ID:-not reached}"
+            echo "- Version: ${KICKLAB_MARKETING_VERSION:-not reached} (build ${KICKLAB_BUILD_NUMBER:-not reached})"
+            if [ "$UPLOAD_REQUESTED" != "true" ]; then
+              echo "- Upload: skipped (build and sign only)"
+            elif [ "$UPLOAD_OUTCOME" = "success" ]; then
+              echo "- Upload: **succeeded** — the build appears in App Store Connect → TestFlight after processing (usually 5–30 minutes)"
+            else
+              echo "- Upload: **not completed** (${UPLOAD_OUTCOME:-not reached})"
+            fi
+            echo "- Result: **${JOB_STATUS}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kicklab-testflight-logs-${{ github.run_number }}
+          path: build/logs
+          if-no-files-found: warn
+          retention-days: 14
